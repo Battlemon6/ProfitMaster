@@ -296,7 +296,7 @@ export default function FinancePage() {
       <TransactionModal 
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        onSave={handleSaveTransaction}
+        onSave={() => fetchTransactions()}
       />
     </div>
   );

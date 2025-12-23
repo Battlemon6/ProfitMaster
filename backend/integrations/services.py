@@ -1,5 +1,6 @@
 import pandas as pd
 from django.db import transaction
+from decimal import Decimal
 from .models import ColumnMapping
 from finance.models import Transaction
 from products.models import Product
@@ -24,22 +25,20 @@ class ExcelProcessor:
         Satış / Hakediş raporlarını işler.
         """
         try:
-            df = pd.read_excel(file_obj)
+            df = pd.read_excel(file_obj) if file_obj.name.endswith('.xlsx') else pd.read_csv(file_obj)
         except Exception as e:
             return {"success": False, "error": f"Excel okunamadı: {str(e)}"}
 
-        # Sütun isimlerini değiştir
         mapping_dict = self.get_column_mapping()
         df.rename(columns=mapping_dict, inplace=True)
 
-        # Zorunlu alan kontrolü
         required_fields = ['order_number', 'sale_price', 'sku']
         missing_fields = [field for field in required_fields if field not in df.columns]
         
         if missing_fields:
              return {
                  "success": False, 
-                 "error": f"Şu sütunlar eşleştirilmedi veya Excel'de yok: {', '.join(missing_fields)}. Lütfen Admin panelden Mapping ayarlarını yapın."
+                 "error": f"Eksik sütunlar: {', '.join(missing_fields)}. Admin panelden Mapping yapın."
              }
 
         created_count = 0
@@ -64,19 +63,21 @@ class ExcelProcessor:
         Stok Envanter raporlarını işler.
         """
         try:
-            df = pd.read_excel(file_obj)
+            if file_obj.name.endswith('.csv'):
+                df = pd.read_csv(file_obj)
+            else:
+                df = pd.read_excel(file_obj)
+            
+            df.columns = [str(c).strip().lower() for c in df.columns]
         except Exception as e:
-            return {"success": False, "error": f"Excel okunamadı: {str(e)}"}
+            return {"success": False, "error": f"Dosya okunamadı: {str(e)}"}
 
         mapping_dict = self.get_column_mapping()
-        df.rename(columns=mapping_dict, inplace=True)
+        clean_mapping = {str(k).strip().lower(): v for k, v in mapping_dict.items()}
+        df.rename(columns=clean_mapping, inplace=True)
 
-        # Zorunlu alan kontrolü (SKU ve Adet şart)
-        required = ['sku', 'stock_quantity']
-        missing = [f for f in required if f not in df.columns]
-        
-        if missing:
-             return {"success": False, "error": f"Eksik sütunlar: {', '.join(missing)}"}
+        if 'sku' not in df.columns:
+             return {"success": False, "error": "Excel'de 'sku' sütunu bulunamadı!"}
 
         updated_count = 0
         created_count = 0
@@ -85,35 +86,37 @@ class ExcelProcessor:
         with transaction.atomic():
             for index, row in df.iterrows():
                 try:
-                    sku = str(row.get('sku')).strip()
-                    qty = int(row.get('stock_quantity', 0))
-                    price = row.get('buying_price', 0)
-                    name = row.get('name', None)
-
-                    defaults = {
-                        'stock_quantity': qty,
-                        'buying_price': price,
-                    }
+                    sku = str(row.get('sku', '')).strip()
+                    if not sku or sku.lower() == 'nan': continue
                     
-                    # Eğer isim Excel'de varsa güncelle, yoksa eskisini koru
-                    if name:
-                        defaults['name'] = name
-
-                    # update_or_create: Ürün varsa güncelle, yoksa oluştur
-                    product, created = Product.objects.update_or_create(
-                        sku=sku,
-                        defaults=defaults
-                    )
+                    # Sayısal veri temizliği
+                    raw_qty = row.get('stock_quantity', 0)
+                    excel_qty = int(float(raw_qty)) if pd.notna(raw_qty) and str(raw_qty).lower() != 'nan' else 0
                     
-                    # Eğer yeni ürünse ve fiyat varsa, weighted_cost'u da başlat
-                    if created and price:
-                        product.weighted_cost = price
-                        product.save()
+                    raw_price = row.get('buying_price', 0)
+                    excel_price = Decimal(str(raw_price)) if pd.notna(raw_price) and str(raw_price).lower() != 'nan' else Decimal('0')
                     
-                    if created:
-                        created_count += 1
-                    else:
+                    product = Product.objects.filter(sku=sku).first()
+                    
+                    if product:
+                        # Eğer ürün varsa: Fiyat 0 değilse güncelle ve stoğu mevcutun üzerine EKLE
+                        if excel_price > 0:
+                            product.buying_price = excel_price
+                        
+                        product.stock_quantity += excel_qty
+                        product.save() # Bu çağrı Product modelindeki hesaplamayı tetikler
                         updated_count += 1
+                    else:
+                        # Ürün yoksa yeni oluştur
+                        Product.objects.create(
+                            sku=sku,
+                            name=str(row.get('name', sku)) if pd.notna(row.get('name')) else sku,
+                            stock_quantity=excel_qty,
+                            buying_price=excel_price,
+                            barcode=str(row.get('barcode', '')) if pd.notna(row.get('barcode')) else '',
+                            description=str(row.get('description', '')) if pd.notna(row.get('description')) else ''
+                        )
+                        created_count += 1
                         
                 except Exception as e:
                     errors.append(f"Satır {index+1}: {str(e)}")
@@ -126,15 +129,12 @@ class ExcelProcessor:
         }
 
     def _create_transaction_from_row(self, row):
-        """
-        Tek bir satış satırını veritabanına kaydeder.
-        """
-        product_sku = row.get('sku')
-        product_instance = None
-        
-        if product_sku:
-            product_sku = str(product_sku).strip()
-            product_instance = Product.objects.filter(sku=product_sku).first()
+        product_sku = str(row.get('sku', '')).strip()
+        product_instance = Product.objects.filter(sku=product_sku).first()
+
+        cost = Decimal('0')
+        if product_instance:
+            cost = product_instance.weighted_cost if product_instance.weighted_cost > 0 else product_instance.buying_price
 
         Transaction.objects.create(
             marketplace=self.marketplace,
@@ -145,6 +145,6 @@ class ExcelProcessor:
             sale_price=row.get('sale_price', 0),
             commission_amount=row.get('commission_amount', 0),
             shipping_cost=row.get('shipping_cost', 0),
-            cost_at_transaction=product_instance.weighted_cost if product_instance else 0,
+            cost_at_transaction=cost,
             transaction_date=row.get('transaction_date', pd.Timestamp.now())
         )

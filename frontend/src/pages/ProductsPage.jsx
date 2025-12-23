@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { productService } from '../services/api';
-import { Search, Package, Plus, Edit2, CheckCircle, ArrowUpDown, Trash2 } from 'lucide-react'; // Trash2 eklendi
+import { Search, Package, Plus, Edit2, CheckCircle, ArrowUpDown, Trash2, Settings2, Check } from 'lucide-react';
 import ProductModal from '../components/ProductModal';
 import EditableCell from '../components/EditableCell';
 
@@ -8,243 +8,234 @@ export default function ProductsPage() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  
-  // Sıralama State'i
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
-
-  // Modal State'leri
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
   const [lastSavedId, setLastSavedId] = useState(null);
+  
+  // --- SÜTUN GÖRÜNÜRLÜK STATE'İ ---
+  const [showColumnMenu, setShowColumnMenu] = useState(false);
+  const [visibleCols, setVisibleCols] = useState({
+    sku: true,
+    name: true,
+    description: true,
+    barcode: true,
+    buying_price: true,
+    stock_quantity: true,
+    actions: true
+  });
 
-  useEffect(() => {
-    fetchProducts();
-  }, []);
+  // --- SÜTUN GENİŞLİK STATE'İ ---
+  const [colWidths, setColWidths] = useState({
+    sku: 20,
+    name: 500,
+    description: 80,
+    barcode: 160,
+    buying_price: 130,
+    stock_quantity: 100,
+    actions: 100
+  });
+
+  const resizerRef = useRef({ activeCol: null, startX: 0, startWidth: 0 });
+
+  useEffect(() => { fetchProducts(); }, []);
 
   const fetchProducts = async () => {
     try {
       const response = await productService.getAll();
       setProducts(response.data);
-    } catch (error) {
-      console.error("Ürünler çekilemedi", error);
-    } finally {
-      setLoading(false);
+    } catch (error) { console.error("Ürünler çekilemedi", error); }
+    finally { setLoading(false); }
+  };
+
+  // --- RESIZING MANTIK ---
+  const handleMouseDown = (e, col) => {
+    resizerRef.current = { activeCol: col, startX: e.pageX, startWidth: colWidths[col] };
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = 'col-resize';
+  };
+
+  const handleMouseMove = (e) => {
+    const { activeCol, startX, startWidth } = resizerRef.current;
+    if (activeCol) {
+      const diff = e.pageX - startX;
+      setColWidths(prev => ({ ...prev, [activeCol]: Math.max(80, startWidth + diff) }));
     }
   };
 
-  // --- SİLME FONKSİYONU ---
-  const handleDeleteClick = async (id) => {
-      // 1. Güvenlik Sorusu
-      if (!window.confirm("Bu ürünü silmek istediğinize emin misiniz? \n(Dikkat: Bu işlem geri alınamaz!)")) {
-          return;
-      }
-
-      // 2. Silme İsteği
-      try {
-          await productService.delete(id);
-          
-          // 3. Listeden Çıkarma (Sayfa yenilemeden)
-          setProducts(products.filter(product => product.id !== id));
-          alert("Ürün başarıyla silindi.");
-      } catch (error) {
-          console.error("Silme hatası:", error);
-          // Eğer ürünün satışı varsa Django silmeye izin vermeyebilir (Protected Error)
-          alert("Hata: Bu ürün silinemedi. (Geçmiş satış kaydı olan ürünler finansal tutarlılık için silinemez.)");
-      }
+  const handleMouseUp = () => {
+    document.removeEventListener('mousemove', handleMouseMove);
+    document.removeEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = 'default';
   };
 
-  const handleSort = (key) => {
-    let direction = 'asc';
-    if (sortConfig.key === key && sortConfig.direction === 'asc') {
-      direction = 'desc';
-    }
-    setSortConfig({ key, direction });
+  const toggleColumn = (col) => {
+    setVisibleCols(prev => ({ ...prev, [col]: !prev[col] }));
   };
 
   const handleInlineUpdate = async (id, field, value) => {
-      const oldProducts = [...products];
-      const updatedProducts = products.map(p => 
-          p.id === id ? { ...p, [field]: value } : p
-      );
-      setProducts(updatedProducts);
-
-      try {
-          await productService.patch(id, { [field]: value });
-          setLastSavedId(id);
-          setTimeout(() => setLastSavedId(null), 2000);
-      } catch (error) {
-          console.error("Hata:", error);
-          alert("Güncelleme başarısız oldu!");
-          setProducts(oldProducts);
-      }
+    const oldProducts = [...products];
+    setProducts(products.map(p => p.id === id ? { ...p, [field]: value } : p));
+    try {
+      await productService.patch(id, { [field]: value });
+      setLastSavedId(id);
+      setTimeout(() => setLastSavedId(null), 2000);
+    } catch (error) {
+      setProducts(oldProducts);
+      alert("Güncelleme başarısız!");
+    }
   };
 
   const handleSaveProduct = async (formData) => {
     try {
-        if (editingProduct) {
-            await productService.update(editingProduct.id, formData);
-        } else {
-            await productService.create(formData);
-        }
-        fetchProducts();
-        setIsModalOpen(false);
-        setEditingProduct(null);
-    } catch (error) {
-        alert("İşlem sırasında hata oluştu.");
-    }
+      if (editingProduct) await productService.update(editingProduct.id, formData);
+      else await productService.create(formData);
+      fetchProducts();
+      setIsModalOpen(false);
+    } catch (error) { alert("Hata oluştu."); }
   };
 
-  const handleEditClick = (product) => {
-      setEditingProduct(product);
-      setIsModalOpen(true);
+  const handleSort = (key) => {
+    let direction = 'asc';
+    if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
+    setSortConfig({ key, direction });
   };
 
-  const handleAddClick = () => {
-      setEditingProduct(null);
-      setIsModalOpen(true);
+  const getSortIcon = (key) => {
+    if (sortConfig.key !== key) return <ArrowUpDown size={14} className="text-gray-400 opacity-50" />;
+    return <ArrowUpDown size={14} className={`text-blue-600 ${sortConfig.direction === 'desc' ? 'rotate-180' : ''}`} />;
   };
 
-  // Filtreleme ve Sıralama
   const processedProducts = [...products]
     .filter(p => 
-        p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-        p.sku.toLowerCase().includes(searchTerm.toLowerCase())
+      (p.name || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
+      (p.sku || '').toLowerCase().includes(searchTerm.toLowerCase())
     )
     .sort((a, b) => {
-        if (!sortConfig.key) return 0;
-
-        let aValue = a[sortConfig.key];
-        let bValue = b[sortConfig.key];
-
-        if (sortConfig.key === 'buying_price' || sortConfig.key === 'stock_quantity') {
-            aValue = parseFloat(aValue);
-            bValue = parseFloat(bValue);
-        } else {
-            aValue = aValue.toString().toLowerCase();
-            bValue = bValue.toString().toLowerCase();
-        }
-
-        if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
-        if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
-        return 0;
+      if (!sortConfig.key) return 0;
+      let aVal = a[sortConfig.key] || '', bVal = b[sortConfig.key] || '';
+      if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
     });
 
-  const getSortIcon = (columnKey) => {
-      if (sortConfig.key !== columnKey) return <ArrowUpDown size={14} className="text-gray-400 opacity-50" />;
-      return <ArrowUpDown size={14} className={sortConfig.direction === 'asc' ? "text-blue-600" : "text-blue-600 rotate-180"} />;
-  };
+  const columns = [
+    { key: 'sku', label: 'SKU' },
+    { key: 'name', label: 'Ürün Adı' },
+    { key: 'description', label: 'Nitelikler' },
+    { key: 'barcode', label: 'Barkod' },
+    { key: 'buying_price', label: 'Alış Fiyatı', align: 'text-right' },
+    { key: 'stock_quantity', label: 'Stok', align: 'text-center' },
+    { key: 'actions', label: 'İşlem', align: 'text-center', noSort: true }
+  ];
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <div className="flex justify-between items-center">
+    <div className="space-y-6 p-4">
+      <div className="flex flex-col md:flex-row justify-between items-center gap-4">
         <h1 className="text-3xl font-bold text-gray-800 flex items-center gap-2">
           <Package className="text-blue-600" /> Ürün Envanteri
         </h1>
         
-        <div className="flex gap-3">
-            <div className="relative">
-                <Search className="absolute left-3 top-3 text-gray-400" size={20} />
-                <input 
-                    type="text" 
-                    placeholder="Ara..." 
-                    className="pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none w-64"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                />
-            </div>
+        <div className="flex items-center gap-2 w-full md:w-auto">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-2.5 text-gray-400" size={18} />
+            <input 
+              type="text" 
+              placeholder="Ara..." 
+              className="pl-10 pr-4 py-2 border rounded-lg w-full md:w-64 focus:ring-2 focus:ring-blue-500 outline-none"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+
+          {/* SÜTUN YÖNETİM BUTONU */}
+          <div className="relative">
             <button 
-                onClick={handleAddClick}
-                className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
+              onClick={() => setShowColumnMenu(!showColumnMenu)}
+              className="p-2 border rounded-lg bg-white hover:bg-gray-50 text-gray-600 flex items-center gap-2"
+              title="Sütunları Yönet"
             >
-                <Plus size={20} /> Yeni Ürün
+              <Settings2 size={20} />
+              <span className="hidden sm:inline">Sütunlar</span>
             </button>
+            
+            {showColumnMenu && (
+              <div className="absolute right-0 mt-2 w-48 bg-white border rounded-xl shadow-xl z-50 p-2">
+                <div className="text-xs font-bold text-gray-400 px-3 py-1 uppercase">Görünür Sütunlar</div>
+                {columns.map(col => (
+                  <label key={col.key} className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 rounded-lg cursor-pointer transition-colors">
+                    <input 
+                      type="checkbox" 
+                      className="hidden"
+                      checked={visibleCols[col.key]}
+                      onChange={() => toggleColumn(col.key)}
+                    />
+                    <div className={`w-5 h-5 border rounded flex items-center justify-center transition-colors ${visibleCols[col.key] ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                      {visibleCols[col.key] && <Check size={14} className="text-white" />}
+                    </div>
+                    <span className={`text-sm ${visibleCols[col.key] ? 'text-gray-900 font-medium' : 'text-gray-400'}`}>{col.label}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <button onClick={() => { setEditingProduct(null); setIsModalOpen(true); }} className="bg-blue-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-blue-700">
+            <Plus size={20} /> <span className="hidden sm:inline">Yeni Ürün</span>
+          </button>
         </div>
       </div>
 
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+      <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead className="bg-gray-50 text-gray-600 font-medium border-b">
+          <table className="text-left border-collapse" style={{ tableLayout: 'fixed', width: 'max-content', minWidth: '100%' }}>
+            <thead className="bg-gray-50 text-gray-600 font-semibold border-b">
               <tr>
-                <th className="p-4 cursor-pointer hover:bg-gray-100 transition-colors" onClick={() => handleSort('sku')}>
-                    <div className="flex items-center gap-2">SKU {getSortIcon('sku')}</div>
-                </th>
-                <th className="p-4 cursor-pointer hover:bg-gray-100 transition-colors" onClick={() => handleSort('name')}>
-                    <div className="flex items-center gap-2">Ürün Adı {getSortIcon('name')}</div>
-                </th>
-                <th className="p-4 cursor-pointer hover:bg-gray-100 transition-colors text-right" onClick={() => handleSort('buying_price')}>
-                    <div className="flex items-center justify-end gap-2">Alış Fiyatı {getSortIcon('buying_price')}</div>
-                </th>
-                <th className="p-4 cursor-pointer hover:bg-gray-100 transition-colors text-center" onClick={() => handleSort('stock_quantity')}>
-                    <div className="flex items-center justify-center gap-2">Stok {getSortIcon('stock_quantity')}</div>
-                </th>
-                <th className="p-4 text-center">İşlem</th>
+                {columns.map(col => visibleCols[col.key] && (
+                  <th 
+                    key={col.key} 
+                    className={`relative p-4 border-r border-gray-100 last:border-r-0 ${col.align || ''}`}
+                    style={{ width: colWidths[col.key] }}
+                  >
+                    <div 
+                      className={`flex items-center gap-1 ${col.noSort ? 'justify-center' : (col.align === 'text-right' ? 'justify-end' : 'justify-start')} ${!col.noSort && 'cursor-pointer'}`}
+                      onClick={() => !col.noSort && handleSort(col.key)}
+                    >
+                      {col.label} {!col.noSort && getSortIcon(col.key)}
+                    </div>
+                    <div onMouseDown={(e) => handleMouseDown(e, col.key)} className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-blue-400" />
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {loading ? (
-                <tr><td colSpan="5" className="p-6 text-center text-gray-500">Yükleniyor...</td></tr>
+                <tr><td colSpan="7" className="p-10 text-center text-gray-400">Veriler yükleniyor...</td></tr>
               ) : processedProducts.map((product) => (
-                  <tr key={product.id} className="hover:bg-gray-50 transition-colors group">
-                    <td className="p-4 font-mono text-sm text-blue-600">
-                        <EditableCell value={product.sku} rowId={product.id} field="sku" onUpdate={handleInlineUpdate} />
-                    </td>
-                    <td className="p-4 font-medium text-gray-800">
-                        <EditableCell value={product.name} rowId={product.id} field="name" onUpdate={handleInlineUpdate} />
-                    </td>
-                    <td className="p-4 text-right text-gray-600">
-                        <div className="flex justify-end">
-                            <EditableCell value={product.buying_price} rowId={product.id} field="buying_price" type="number" prefix="₺" onUpdate={handleInlineUpdate} />
-                        </div>
-                    </td>
-                    <td className="p-4">
-                        <div className="flex justify-center">
-                            <div className="w-20 text-center">
-                                <EditableCell value={product.stock_quantity} rowId={product.id} field="stock_quantity" type="number" onUpdate={handleInlineUpdate} />
-                            </div>
-                        </div>
-                    </td>
+                <tr key={product.id} className="hover:bg-blue-50/20 transition-colors">
+                  {visibleCols.sku && <td className="p-4 border-r border-gray-50 font-mono text-sm text-blue-600"><EditableCell value={product.sku} rowId={product.id} field="sku" onUpdate={handleInlineUpdate} /></td>}
+                  {visibleCols.name && <td className="p-4 border-r border-gray-50 font-medium text-gray-800"><EditableCell value={product.name} rowId={product.id} field="name" onUpdate={handleInlineUpdate} /></td>}
+                  {visibleCols.description && <td className="p-4 border-r border-gray-50 text-xs text-gray-500 italic"><EditableCell value={product.description} rowId={product.id} field="description" onUpdate={handleInlineUpdate} /></td>}
+                  {visibleCols.barcode && <td className="p-4 border-r border--50 text-xs font-mono text-gray-400"><EditableCell value={product.barcode} rowId={product.id} field="barcode" onUpdate={handleInlineUpdate} /></td>}
+                  {visibleCols.buying_price && <td className="p-4 border-r border-gray-50 text-right text-gray-600"><div className="flex justify-end"><EditableCell value={product.buying_price} rowId={product.id} field="buying_price" type="number" prefix="₺" onUpdate={handleInlineUpdate} /></div></td>}
+                  {visibleCols.stock_quantity && <td className="p-4 border-r border-gray-50"><div className="flex justify-center"><EditableCell value={product.stock_quantity} rowId={product.id} field="stock_quantity" type="number" onUpdate={handleInlineUpdate} /></div></td>}
+                  {visibleCols.actions && (
                     <td className="p-4 text-center">
-                        <div className="flex items-center justify-center gap-2">
-                            {lastSavedId === product.id && (
-                                <span className="text-green-500 flex items-center text-xs font-bold animate-pulse">
-                                    <CheckCircle size={14} className="mr-1"/> Kaydedildi
-                                </span>
-                            )}
-                            
-                            {/* DÜZENLE BUTONU */}
-                            <button 
-                                onClick={() => handleEditClick(product)}
-                                className="text-gray-400 hover:text-blue-600 transition-colors p-2"
-                                title="Detaylı Düzenle"
-                            >
-                                <Edit2 size={18} />
-                            </button>
-
-                            {/* SİLME BUTONU (YENİ) */}
-                            <button 
-                                onClick={() => handleDeleteClick(product.id)}
-                                className="text-gray-400 hover:text-red-600 transition-colors p-2"
-                                title="Ürünü Sil"
-                            >
-                                <Trash2 size={18} />
-                            </button>
-                        </div>
+                      <div className="flex justify-center gap-2">
+                        {lastSavedId === product.id && <CheckCircle size={16} className="text-green-500" />}
+                        <button onClick={() => { setEditingProduct(product); setIsModalOpen(true); }} className="text-gray-400 hover:text-blue-600 p-1"><Edit2 size={16} /></button>
+                        <button onClick={() => { if(window.confirm("Silinsin mi?")) productService.delete(product.id).then(() => fetchProducts()) }} className="text-gray-400 hover:text-red-600 p-1"><Trash2 size={16} /></button>
+                      </div>
                     </td>
-                  </tr>
-                ))
-              }
+                  )}
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
       </div>
-
-      <ProductModal 
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onSave={handleSaveProduct}
-        productToEdit={editingProduct}
-      />
+      <ProductModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onSave={handleSaveProduct} productToEdit={editingProduct} />
     </div>
   );
 }
